@@ -1,0 +1,58 @@
+services:
+  network:
+    image: debian:bookworm-slim
+    command: [sleep, infinity]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "127.0.0.1:8181:8080"
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+      net.ipv6.conf.default.disable_ipv6: "1"
+
+  singbox:
+    build: ../..
+    restart: unless-stopped
+    network_mode: service:network
+    depends_on:
+      network:
+        condition: service_started
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      SOCKS_SERVER: "${SOCKS_SERVER:?Set SOCKS_SERVER in .env}"
+      SOCKS_PORT: "${SOCKS_PORT:-1080}"
+      SOCKS_USERNAME: "${SOCKS_USERNAME:-}"
+      SOCKS_PASSWORD: "${SOCKS_PASSWORD:-}"
+    tmpfs:
+      - /run/sing-box:mode=0700
+
+  app:
+    image: python:3.13-alpine
+    command: ["python", "-B", "-u", "/app.py"]
+    user: "65534:65534"
+    read_only: true
+    restart: on-failure
+    network_mode: service:network
+    depends_on:
+      singbox:
+        condition: service_healthy
+    cap_drop: [NET_ADMIN, NET_RAW]
+    init: true
+    configs:
+      - source: app_resolv
+        target: /etc/resolv.conf
+      - source: app_script
+        target: /app.py
+
+configs:
+  app_script:
+    file: ./app.py
+  app_resolv:
+    content: |
+      nameserver 1.1.1.1
+      options timeout:2 attempts:2

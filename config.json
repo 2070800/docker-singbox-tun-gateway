@@ -1,0 +1,58 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "tls",
+        "tag": "dns",
+        "server": "1.1.1.1",
+        "server_port": 853,
+        "detour": "proxy"
+      }
+    ],
+    "final": "dns",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "singbox-tun",
+      "address": ["198.18.0.1/30"],
+      "mtu": 1400,
+      "auto_route": false,
+      "auto_redirect": false,
+      "dns_mode": "disabled"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "proxy",
+      "server": "${SOCKS_SERVER}",
+      "server_port": "${SOCKS_PORT}",
+      "version": "5",
+      "username": "${SOCKS_USERNAME}",
+      "password": "${SOCKS_PASSWORD}",
+      "routing_mark": 3
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "dns",
+    "rules": [
+      {
+        "network": ["tcp", "udp"],
+        "port": 53,
+        "action": "hijack-dns"
+      },
+      {
+        "network": ["udp", "icmp"],
+        "action": "reject"
+      }
+    ],
+    "final": "proxy"
+  }
+}
