@@ -19,6 +19,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Check release tag against sing-box version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            exit 0
+          fi
+
+          pattern='^v([0-9]+\.[0-9]+\.[0-9]+)-r([1-9][0-9]*)$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $pattern ]]; then
+            echo "::error::Release tags must use v<SINGBOX_VERSION>-r<revision>, for example v1.14.2-r1"
+            exit 1
+          fi
+
+          release_version="${BASH_REMATCH[1]}"
+          bundled_version="$(sed -n 's/^ARG SINGBOX_VERSION=//p' Dockerfile)"
+          if [[ "$release_version" != "$bundled_version" ]]; then
+            echo "::error::Tag sing-box version $release_version differs from Dockerfile version $bundled_version"
+            exit 1
+          fi
       - name: Install renderer test dependencies
         run: sudo apt-get update && sudo apt-get install -y jq iproute2
       - name: Check shell syntax and configuration rendering
@@ -67,8 +86,7 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=match,pattern=^v([0-9]+\.[0-9]+\.[0-9]+-r[1-9][0-9]*)$,group=1
             type=sha
           labels: |
             org.opencontainers.image.licenses=GPL-3.0-or-later

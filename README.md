@@ -159,8 +159,32 @@ or `master`, `v*` tags, and manual workflow runs publish an image for
 Action references are pinned to commit hashes.
 
 The image name is derived from the GitHub owner and repository, lowercased:
-`ghcr.io/2070800/docker-singbox-tun-gateway` for this repository. The default branch produces `latest`; a version
-tag such as `v0.1.0` produces `0.1.0` and `0.1`. Builds also get a `sha-*` tag.
+`ghcr.io/2070800/docker-singbox-tun-gateway` for this repository. The default
+branch produces `latest`. Builds also get a `sha-*` tag.
+
+Release tags use **`v<sing-box version>-r<image revision>`**:
+
+- `v1.14.2-r1`: first image revision using sing-box 1.14.2.
+- `v1.14.2-r2`: packaging, script or config changes with the same sing-box version.
+- `v1.14.3-r1`: first image revision after upgrading sing-box to 1.14.3.
+
+The workflow rejects release tags whose sing-box version differs from the
+`SINGBOX_VERSION` default in the Dockerfile. Revisions start at 1. The exact tag
+is published without the initial `v`; shortened version tags are not published.
+Release tags do not update the default branch's `latest` tag.
+
+For example, after committing and pushing the release changes:
+
+```sh
+git tag -a v1.14.2-r1 -m "sing-box 1.14.2, image revision 1"
+git push origin v1.14.2-r1
+```
+
+Use the published release in Compose:
+
+```yaml
+image: ghcr.io/2070800/docker-singbox-tun-gateway:1.14.2-r1
+```
 
 For the first publication:
 
