@@ -27,11 +27,18 @@ ip -j -4 addr show > "$temporary/interfaces.json"
 ip -j -4 route show table main > "$temporary/routes.json"
 jq -e --slurpfile interfaces "$temporary/interfaces.json" \
       --slurpfile routes "$temporary/routes.json" \
-      -f "$filters/render_config.jq" "$source" > "$temporary/config.json"
+      -f "$filters/render_config.jq" "$source" > "$temporary/rendered.json"
 
 # The JSON filter validated every address and port before nft interpolation.
-jq -r '[.outbounds[] | select(.type == "socks") | {server, server_port}] |
+jq '.config' "$temporary/rendered.json" > "$temporary/config.json"
+jq -r '[.config.outbounds[] | select(.type == "socks") | {server, server_port}] |
        unique | map("\(.server) . \(.server_port)") | join(", ")' \
-       "$temporary/config.json" > "$temporary/socks-endpoints.nft"
+       "$temporary/rendered.json" > "$temporary/socks-endpoints.nft"
+jq -r '.direct_tcp_endpoints | map("\(.server) . \(.server_port)") | join(", ")' \
+       "$temporary/rendered.json" > "$temporary/direct-tcp-endpoints.nft"
+jq -r '.routed_direct_tcp_endpoints | map("\(.server) . \(.server_port)") | join(", ")' \
+       "$temporary/rendered.json" > "$temporary/routed-direct-tcp-endpoints.nft"
+mv "$temporary/routed-direct-tcp-endpoints.nft" "$runtime/routed-direct-tcp-endpoints.nft"
 mv "$temporary/socks-endpoints.nft" "$runtime/socks-endpoints.nft"
+mv "$temporary/direct-tcp-endpoints.nft" "$runtime/direct-tcp-endpoints.nft"
 mv "$temporary/config.json" "$destination"

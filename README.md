@@ -4,8 +4,9 @@ Author: 2070800 <no@email.me>
 Repository: https://github.com/2070800/docker-singbox-tun-gateway
 
 A Linux sidecar that routes traffic from a shared network namespace through a
-sing-box TUN interface and TCP SOCKS5. nftables permits outbound transport only
-to the configured SOCKS endpoints; replies to inbound connections are allowed.
+sing-box TUN interface and TCP SOCKS5. nftables permits outbound transport to
+configured SOCKS endpoints and optional direct TCP endpoints. Replies to inbound
+connections are also allowed.
 
 ## Default configuration
 
@@ -22,6 +23,7 @@ Set these environment variables on the sing-box service:
 | `SOCKS_PORT` | `1080` | SOCKS5 server TCP port |
 | `SOCKS_USERNAME` | empty | Optional username |
 | `SOCKS_PASSWORD` | empty | Optional password; set both credentials or neither |
+| `DIRECT_TCP_ENDPOINTS` | empty | Comma-separated IPv4:port pairs reached directly through the Docker network |
 | `SINGBOX_CONFIG_FILE` | `/etc/sing-box/config.json` | Input configuration path inside the container |
 
 For example, on your existing Compose `singbox` service:
@@ -41,6 +43,52 @@ includes a healthcheck; it checks local process/routing state, not remote proxy
 availability. Application DNS should use a non-loopback address such as `1.1.1.1`;
 port 53 traffic is intercepted by the bundled config. Disable IPv6 in the shared
 namespace as in the existing Compose setup; this gateway is IPv4-only.
+
+## Direct TCP endpoints
+
+For internal services that must be reached directly, such as SSH workers, add
+the exact IPv4 address and TCP port of each service to the sidecar environment:
+
+```yaml
+services:
+  singbox:
+    environment:
+      DIRECT_TCP_ENDPOINTS: "198.51.100.20:2223,198.51.100.20:2224"
+```
+
+The sidecar clears previous direct exceptions before validating a replacement
+configuration. If validation fails, the prior guard stays in place with its
+direct exceptions closed.
+
+The listed connections use the Docker network route and bypass sing-box. Other
+outgoing application connections still use the TUN. Use IPv4 literals and decimal
+ports in 1–65535. The gateway validates the list at startup. The Docker network
+must already have a route to those addresses.
+
+### Direct endpoints selected by sing-box rules
+
+To keep routing decisions in sing-box, give a `direct` outbound an explicit
+tag and `routing_mark: 3`. Add top-level TCP route rules with exact IPv4
+addresses (or `/32` CIDRs) and explicit ports pointing to that tag. For example:
+
+```json
+{"type": "direct", "tag": "ssh-direct", "routing_mark": 3}
+```
+
+```json
+{"network": "tcp", "ip_cidr": ["198.51.100.20/32"], "port": [2223, 2224], "action": "route", "outbound": "ssh-direct"}
+```
+
+The sidecar adds those pairs to the firewall for the marked sockets that
+sing-box opens. Application traffic still enters the TUN, so sing-box applies
+its route rules in order. Rules for a marked direct outbound must use only
+`network`, `ip_cidr`, `port`, `outbound`, and optional `type: default` or
+`action: route`. A marked direct outbound needs a tag and cannot be the
+default outbound or use a detour.
+
+Both mechanisms can be used together. If a pair also appears in
+`DIRECT_TCP_ENDPOINTS`, the application connects directly before reaching the
+TUN.
 
 ## Override the config
 
@@ -76,7 +124,7 @@ A custom config must match the networking implemented in `entrypoint.sh`:
   `routing_mark: 3` on every SOCKS outbound.
 - Route upstream DNS through a SOCKS outbound as well.
 - Direct internet outbounds and other proxy protocols are not supported by the
-  current firewall allowlist. Adding them to JSON alone does not enable them.
+  firewall allowlist. Configure direct TCP exceptions through `DIRECT_TCP_ENDPOINTS`.
 
 The inbound firewall currently permits TCP ports 2222 and 8080. If workloads
 listen on other ports, update that list in `entrypoint.sh` as well as Compose.

@@ -2,12 +2,36 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -eu
 
-# Render variables and validate every SOCKS endpoint before any nft interpolation.
+# The namespace can outlive the sidecar. Revoke old direct permissions before
+# checking the replacement config, so failure cannot leave them usable.
+revoke_direct_rules=""
+for endpoint_set in direct_tcp_endpoints routed_direct_tcp_endpoints; do
+  if nft list set inet proxy_guard "$endpoint_set" >/dev/null 2>&1; then
+    revoke_direct_rules="${revoke_direct_rules}flush set inet proxy_guard $endpoint_set
+"
+  fi
+done
+if [ -n "$revoke_direct_rules" ]; then
+  printf '%s' "$revoke_direct_rules" | nft -f -
+fi
+
+# Render variables and validate every endpoint before any nft interpolation.
 umask 077
 mkdir -p /run/sing-box
 /render_config.sh
 sing-box check -c /run/sing-box/config.json
 SOCKS_ENDPOINTS="$(cat /run/sing-box/socks-endpoints.nft)"
+DIRECT_TCP_PAIRS="$(cat /run/sing-box/direct-tcp-endpoints.nft)"
+DIRECT_TCP_ELEMENTS=""
+if [ -n "$DIRECT_TCP_PAIRS" ]; then
+  DIRECT_TCP_ELEMENTS="elements = { $DIRECT_TCP_PAIRS };"
+fi
+
+ROUTED_DIRECT_TCP_PAIRS="$(cat /run/sing-box/routed-direct-tcp-endpoints.nft)"
+ROUTED_DIRECT_TCP_ELEMENTS=""
+if [ -n "$ROUTED_DIRECT_TCP_PAIRS" ]; then
+  ROUTED_DIRECT_TCP_ELEMENTS="elements = { $ROUTED_DIRECT_TCP_PAIRS };"
+fi
 
 echo "[guard] Installing fail-closed nftables rules"
 
@@ -25,6 +49,16 @@ table inet proxy_guard {
         elements = { $SOCKS_ENDPOINTS };
     }
 
+    set direct_tcp_endpoints {
+        type ipv4_addr . inet_service;
+        $DIRECT_TCP_ELEMENTS
+    }
+
+    set routed_direct_tcp_endpoints {
+        type ipv4_addr . inet_service;
+        $ROUTED_DIRECT_TCP_ELEMENTS
+    }
+
     chain mark_output {
         type route hook output priority mangle; policy accept;
 
@@ -35,8 +69,9 @@ table inet proxy_guard {
         # Loopback is local-only.
         oifname "lo" return
 
-        # sing-box marks its own SOCKS transport with SO_MARK=0x3.
+        # sing-box marks SOCKS transport and opted-in direct sockets with SO_MARK=0x3.
         meta mark 0x3 return
+        ct direction original ip daddr . tcp dport @direct_tcp_endpoints counter meta mark set 0x3 return
 
         # Replies to connections initiated from outside must use the main
         # route, not the TUN. All other locally-originated packets use TUN.
@@ -67,6 +102,8 @@ table inet proxy_guard {
 
         # Exact address/port pairs derived from the rendered SOCKS outbounds.
         meta mark 0x3 ip daddr . tcp dport @socks_endpoints counter accept
+        meta mark 0x3 ip daddr . tcp dport @direct_tcp_endpoints counter accept
+        meta mark 0x3 ip daddr . tcp dport @routed_direct_tcp_endpoints counter accept
 
         # Workspace-originated traffic may leave only through the TUN.
         oifname "singbox-tun" counter accept
@@ -86,8 +123,7 @@ ip rule del priority 100 2>/dev/null || true
 ip rule del priority 101 2>/dev/null || true
 ip rule del priority 110 2>/dev/null || true
 
-# Replies to inbound published-port connections and sing-box transport
-# use the ordinary Docker route.
+# Inbound replies, SOCKS transport and permitted direct TCP use the Docker route.
 ip rule add priority 100 fwmark 0x2/0xffffffff lookup main
 ip rule add priority 101 fwmark 0x3/0xffffffff lookup main
 

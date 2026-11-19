@@ -28,12 +28,59 @@ def ipv4:
   if type != "string" then false
   else test("\\A(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}\\z")
        and all(split(".")[]; tonumber <= 255) end;
+def tcp_port:
+  if type == "number" then . >= 1 and . <= 65535 and . == floor else false end;
+def list:
+  if type == "array" then . else [.] end;
+def direct_tcp_endpoints:
+  ($ENV.DIRECT_TCP_ENDPOINTS // "") |
+  if . == "" then []
+  else split(",") | map(
+    gsub("\\A[[:space:]]+|[[:space:]]+\\z"; "") | split(":") |
+    if length != 2 or (.[0] | ipv4 | not) or (.[1] | test("\\A[0-9]{1,5}\\z") | not)
+    then fail("DIRECT_TCP_ENDPOINTS must contain comma-separated IPv4:port pairs")
+    else {server: .[0], server_port: (.[1] | tonumber)} end |
+    if (.server_port | tcp_port | not)
+    then fail("DIRECT_TCP_ENDPOINTS ports must be in 1..65535")
+    else . end
+  ) | unique end;
+
+def mark_three:
+  if type == "string" then test("\\A(0[xX])?0*3\\z") else . == 3 end;
+
+def routed_direct_tcp_endpoints:
+  [.outbounds[] | select(.type == "direct" and (.routing_mark | mark_three)) |
+    if (.tag // "") == "" or (.detour // "") != "" then
+      fail("A marked direct outbound needs a tag and cannot use detour")
+    else .tag end] as $tags |
+  (.route.final // "") as $final |
+  (if $final == "" then .outbounds[0].tag else $final end) as $default |
+  if ($tags | index($default)) != null then
+    fail("A marked direct outbound cannot be the default route")
+  else
+    [.route.rules[]? |
+      select(.outbound as $outbound | ($tags | index($outbound)) != null) |
+      if (keys_unsorted - ["type", "action", "network", "ip_cidr", "port", "outbound"] | length) > 0
+         or (.type // "default") != "default" or (.action // "route") != "route"
+         or (.network | list) != ["tcp"]
+      then fail("Marked direct rules require TCP, exact IPv4 addresses and explicit ports")
+      else . end |
+      (.ip_cidr | list | map(
+        if type == "string" and (sub("/32\\z"; "") | ipv4)
+        then sub("/32\\z"; "") else fail("Marked direct rules require IPv4 addresses or /32 CIDRs") end
+      )) as $addresses |
+      (.port | list) as $ports |
+      if ($addresses | length) == 0 or ($ports | length) == 0 or any($ports[]; tcp_port | not)
+      then fail("Marked direct rules require at least one address and TCP ports in 1..65535")
+      else $addresses[] as $address | $ports[] | {server: $address, server_port: .} end
+    ] | unique
+  end;
+
 def validate_socks:
   if .type != "socks" then .
   elif .routing_mark != 3 then fail("Each SOCKS outbound requires routing_mark 3")
   elif (.server | ipv4 | not) then fail("Each SOCKS server must be an IPv4 literal")
-  elif (.server_port | type) != "number" then fail("SOCKS server_port must be an integer in 1..65535")
-  elif .server_port < 1 or .server_port > 65535 or (.server_port | floor) != .server_port
+  elif (.server_port | tcp_port | not)
     then fail("SOCKS server_port must be an integer in 1..65535")
   elif (.version // "5") != "5" or (.network // "tcp") != "tcp"
     then fail("Only TCP SOCKS5 outbounds are supported")
@@ -57,7 +104,7 @@ def subnet:
     pow(2; 32 - $prefix) as $size |
     (($ip / $size | floor) * $size) as $first | [$first, $first + $size - 1]
   end;
-def validate_network:
+def validate_network($direct; $routed):
   [.inbounds[]? | select(.type == "tun")] as $tuns |
   [$tuns[].interface_name] as $names |
   [
@@ -69,7 +116,9 @@ def validate_network:
       ((select((.dst // "default") != "default" and .dst != "0.0.0.0/0") |
         {cidr: .dst, kind: "container route"}),
        (select(.gateway != null) | {cidr: .gateway, kind: "Docker gateway"}))),
-    (.outbounds[] | select(.type == "socks") | {cidr: .server, kind: "SOCKS endpoint"})
+    (.outbounds[] | select(.type == "socks") | {cidr: .server, kind: "SOCKS endpoint"}),
+    ($direct[] | {cidr: .server, kind: "DIRECT_TCP_ENDPOINTS address"}),
+    ($routed[] | {cidr: .server, kind: "marked direct rule address"})
   ] as $occupied |
   [ $tuns[] | .address | if type == "array" then .[] else . end |
     select(contains(":") | not) | subnet as $tun |
@@ -79,9 +128,12 @@ def validate_network:
   if $conflicts | length > 0 then fail("TUN subnet overlaps " + $conflicts[0]) else . end;
 
 try (
-  render | .outbounds |= map(validate_socks) |
-  if any(.outbounds[]; .type == "socks") then validate_network
-  else fail("Configure at least one SOCKS outbound") end
+  direct_tcp_endpoints as $direct |
+  (render | .outbounds |= map(validate_socks)) |
+  routed_direct_tcp_endpoints as $routed |
+  if any(.outbounds[]; .type == "socks") then validate_network($direct; $routed)
+  else fail("Configure at least one SOCKS outbound") end |
+  {config: ., direct_tcp_endpoints: $direct, routed_direct_tcp_endpoints: $routed}
 ) catch (
   if startswith("CONFIG: ") then error(.)
   else fail("Invalid configuration structure") end
